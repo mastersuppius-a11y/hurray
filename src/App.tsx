@@ -412,72 +412,35 @@ function App() {
         return;
       }
 
-      console.log(`Starting to generate solutions for ${pyqs.length} PYQs...`);
-
-      for (let i = 0; i < pyqs.length; i++) {
+      for (const pyq of pyqs) {
         if (isPaused) break;
-
-        const pyq = pyqs[i];
-        console.log(`Processing PYQ ${i + 1}/${pyqs.length}: ${pyq.id}`);
 
         try {
           const context = await getQuestionContextForTopic(pyq.topic_id);
-          if (!context) {
-            console.log(`Skipping PYQ ${pyq.id}: Could not get context`);
-            continue;
-          }
-
-          const { data: topicData } = await supabase
-            .from('topics')
-            .select('notes')
-            .eq('id', pyq.topic_id)
-            .maybeSingle();
-
-          const topicNotes = topicData?.notes || undefined;
-
-          const { data: relatedPYQs } = await supabase
-            .from('questions_topic_wise')
-            .select('question_statement, solution')
-            .eq('topic_id', pyq.topic_id)
-            .not('solution', 'is', null)
-            .limit(3);
-
-          const existingPYQs = relatedPYQs?.map(q => q.question_statement) || undefined;
+          if (!context) continue;
 
           const options = pyq.options ? JSON.parse(pyq.options) : null;
 
-          console.log(`Generating solution for PYQ ${pyq.id}...`);
           const { answer, solution } = await generatePYQSolution(
             pyq.question_statement,
             pyq.question_type,
             options,
-            context,
-            topicNotes,
-            existingPYQs
+            context
           );
 
-          console.log(`Saving solution for PYQ ${pyq.id}...`);
-          const { error: updateError } = await supabase
+          await supabase
             .from('questions_topic_wise')
             .update({ answer, solution })
             .eq('id', pyq.id);
 
-          if (updateError) {
-            console.error(`Error updating PYQ ${pyq.id}:`, updateError);
-          } else {
-            console.log(`Successfully saved solution for PYQ ${pyq.id}`);
-            setPyqSolutionsCount(prev => prev + 1);
-          }
+          setPyqSolutionsCount(prev => prev + 1);
 
         } catch (err: any) {
-          console.error(`Error generating PYQ solution for ${pyq.id}:`, err);
+          console.error('Error generating PYQ solution:', err);
         }
       }
 
-      console.log('Finished generating PYQ solutions');
-
     } catch (err: any) {
-      console.error('Error in handleGeneratePYQSolutions:', err);
       setError(err.message || 'Failed to generate PYQ solutions');
     } finally {
       setIsGenerating(false);
@@ -706,39 +669,35 @@ function App() {
               </div>
             )}
 
-            {mode !== 'pyq' && (
-              <>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-2">Part (Optional)</label>
-                  <select
-                    value={selectedPart}
-                    onChange={(e) => setSelectedPart(e.target.value)}
-                    disabled={!selectedCourse}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-100"
-                  >
-                    <option value="">Select Part</option>
-                    {parts.map((part) => (
-                      <option key={part.id} value={part.id}>{part.name}</option>
-                    ))}
-                  </select>
-                </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-2">Part (Optional)</label>
+              <select
+                value={selectedPart}
+                onChange={(e) => setSelectedPart(e.target.value)}
+                disabled={!selectedCourse}
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-100"
+              >
+                <option value="">Select Part</option>
+                {parts.map((part) => (
+                  <option key={part.id} value={part.id}>{part.name}</option>
+                ))}
+              </select>
+            </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-2">Slot (Optional)</label>
-                  <select
-                    value={selectedSlot}
-                    onChange={(e) => setSelectedSlot(e.target.value)}
-                    disabled={!selectedCourse}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-100"
-                  >
-                    <option value="">Select Slot</option>
-                    {slots.map((slot) => (
-                      <option key={slot.id} value={slot.id}>{slot.name}</option>
-                    ))}
-                  </select>
-                </div>
-              </>
-            )}
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-2">Slot (Optional)</label>
+              <select
+                value={selectedSlot}
+                onChange={(e) => setSelectedSlot(e.target.value)}
+                disabled={!selectedCourse}
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-100"
+              >
+                <option value="">Select Slot</option>
+                {slots.map((slot) => (
+                  <option key={slot.id} value={slot.id}>{slot.name}</option>
+                ))}
+              </select>
+            </div>
           </div>
 
           {mode !== 'pyq' && (
