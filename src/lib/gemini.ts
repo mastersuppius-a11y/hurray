@@ -4,7 +4,6 @@ console.log('Loaded Gemini API Keys:', GEMINI_API_KEYS.length);
 
 if (GEMINI_API_KEYS.length === 0) {
   console.error('No Gemini API keys found in environment variables!');
-  throw new Error('No Gemini API keys configured. Please add VITE_GEMINI_API_KEYS to your .env file.');
 }
 
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent';
@@ -37,6 +36,10 @@ export interface QuestionContext {
 }
 
 async function callGeminiAPI(prompt: string, retryCount = 0): Promise<string> {
+  if (GEMINI_API_KEYS.length === 0) {
+    throw new Error('No Gemini API keys configured. Please add VITE_GEMINI_API_KEYS to your .env file.');
+  }
+
   if (retryCount >= GEMINI_API_KEYS.length * 2) {
     throw new Error('All API keys failed after multiple retries. Please check your Gemini API configuration and quota.');
   }
@@ -72,6 +75,21 @@ async function callGeminiAPI(prompt: string, retryCount = 0): Promise<string> {
       if (response.status === 429) {
         console.log('Rate limit hit, waiting 2 seconds before retry...');
         await new Promise(resolve => setTimeout(resolve, 2000));
+        return callGeminiAPI(prompt, retryCount + 1);
+      }
+
+      if (response.status === 400) {
+        let errorMessage = 'Bad request to Gemini API';
+        try {
+          const errorData = JSON.parse(errorText);
+          if (errorData.error && errorData.error.message) {
+            errorMessage = errorData.error.message;
+          }
+        } catch (e) {
+          console.error('Could not parse error response');
+        }
+        console.error('API Error 400:', errorMessage);
+        return callGeminiAPI(prompt, retryCount + 1);
       }
 
       return callGeminiAPI(prompt, retryCount + 1);
@@ -79,9 +97,17 @@ async function callGeminiAPI(prompt: string, retryCount = 0): Promise<string> {
 
     const data = await response.json();
 
-    if (!data.candidates || !data.candidates[0] || !data.candidates[0].content || !data.candidates[0].content.parts || !data.candidates[0].content.parts[0]) {
-      console.error('Invalid API response structure:', JSON.stringify(data));
-      throw new Error('Invalid response from Gemini API');
+    if (!data.candidates || !data.candidates[0]) {
+      console.error('No candidates in API response:', JSON.stringify(data));
+      if (data.error) {
+        throw new Error(`Gemini API Error: ${data.error.message || 'Unknown error'}`);
+      }
+      throw new Error('Invalid response from Gemini API - no candidates returned');
+    }
+
+    if (!data.candidates[0].content || !data.candidates[0].content.parts || !data.candidates[0].content.parts[0]) {
+      console.error('Invalid content structure:', JSON.stringify(data.candidates[0]));
+      throw new Error('Invalid response from Gemini API - malformed content');
     }
 
     console.log('✓ Successfully received response from Gemini API');
@@ -103,49 +129,74 @@ export async function generateQuestion(
   topicId: string,
   existingQuestions: string[],
   alreadyGeneratedQuestions: string[],
-  context: QuestionContext
+  context: QuestionContext,
+  maxRetries = 3
 ): Promise<GeneratedQuestion> {
   console.log(`Generating ${questionType} question for topic: ${context.topicName}`);
 
   const prompt = buildQuestionPrompt(questionType, existingQuestions, alreadyGeneratedQuestions, context);
 
-  try {
-    const generatedText = await callGeminiAPI(prompt);
-    console.log('Parsing generated response...');
-    const question = parseGeneratedQuestion(generatedText, questionType);
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`Generation attempt ${attempt}/${maxRetries}`);
+      const generatedText = await callGeminiAPI(prompt);
+      console.log('Parsing generated response...');
+      const question = parseGeneratedQuestion(generatedText, questionType);
 
-    console.log('Verifying answer...');
-    const isValid = await verifyAnswer(question, context);
-    if (!isValid) {
-      console.log('Answer verification failed, regenerating...');
-      return generateQuestion(questionType, topicId, existingQuestions, alreadyGeneratedQuestions, context);
+      console.log('Verifying answer...');
+      const isValid = await verifyAnswer(question, context);
+      if (!isValid) {
+        console.log('Answer verification failed, retrying...');
+        continue;
+      }
+
+      console.log('✓ Question generated and verified successfully');
+      return question;
+    } catch (error: any) {
+      console.error(`Attempt ${attempt} failed:`, error.message);
+      if (attempt === maxRetries) {
+        throw new Error(`Question generation failed after ${maxRetries} attempts: ${error.message}`);
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
-
-    console.log('✓ Question generated and verified successfully');
-    return question;
-  } catch (error: any) {
-    console.error('Failed to generate question:', error);
-    throw new Error(`Question generation failed: ${error.message}`);
   }
+
+  throw new Error('Question generation failed');
 }
 
 export async function generatePYQSolution(
   questionStatement: string,
   questionType: string,
   options: string[] | null,
-  context: QuestionContext
+  context: QuestionContext,
+  maxRetries = 3
 ): Promise<{ answer: string; solution: string }> {
   const prompt = buildPYQSolutionPrompt(questionStatement, questionType, options, context);
-  const generatedText = await callGeminiAPI(prompt);
-  const result = parsePYQSolution(generatedText, questionType);
 
-  const isValid = await verifyPYQAnswer(questionStatement, result.answer, questionType, options);
-  if (!isValid) {
-    console.log('PYQ answer verification failed, regenerating...');
-    return generatePYQSolution(questionStatement, questionType, options, context);
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`PYQ solution generation attempt ${attempt}/${maxRetries}`);
+      const generatedText = await callGeminiAPI(prompt);
+      const result = parsePYQSolution(generatedText, questionType);
+
+      const isValid = await verifyPYQAnswer(questionStatement, result.answer, questionType, options);
+      if (!isValid) {
+        console.log('PYQ answer verification failed, retrying...');
+        continue;
+      }
+
+      console.log('✓ PYQ solution generated successfully');
+      return result;
+    } catch (error: any) {
+      console.error(`PYQ attempt ${attempt} failed:`, error.message);
+      if (attempt === maxRetries) {
+        throw new Error(`PYQ solution generation failed after ${maxRetries} attempts: ${error.message}`);
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
   }
 
-  return result;
+  throw new Error('PYQ solution generation failed');
 }
 
 function buildQuestionPrompt(
@@ -263,27 +314,42 @@ ${questionType === 'MSQ' ? 'CRITICAL: Choose AT LEAST ONE correct option (can be
 }
 
 function parseGeneratedQuestion(text: string, questionType: string): GeneratedQuestion {
+  console.log('Parsing generated text:', text.substring(0, 200) + '...');
+
   const questionMatch = text.match(/QUESTION:\s*([\s\S]*?)(?=OPTIONS:|ANSWER:)/);
   const optionsMatch = text.match(/OPTIONS:\s*([\s\S]*?)(?=ANSWER:)/);
   const answerMatch = text.match(/ANSWER:\s*(.*?)(?=\n|SOLUTION:)/);
   const solutionMatch = text.match(/SOLUTION:\s*([\s\S]*?)$/);
 
-  const question_statement = questionMatch ? questionMatch[1].trim() : '';
-  const answer = answerMatch ? answerMatch[1].trim() : '';
-  const solution = solutionMatch ? solutionMatch[1].trim() : '';
+  if (!questionMatch || !answerMatch || !solutionMatch) {
+    console.error('Failed to parse response. Text:', text);
+    throw new Error('Could not parse API response. The format was incorrect.');
+  }
+
+  const question_statement = questionMatch[1].trim();
+  const answer = answerMatch[1].trim();
+  const solution = solutionMatch[1].trim();
 
   let options: string[] | undefined;
   if (questionType === 'MCQ' || questionType === 'MSQ') {
-    if (optionsMatch) {
-      const optionsText = optionsMatch[1].trim();
-      options = optionsText
-        .split('\n')
-        .map(opt => opt.trim())
-        .filter(opt => opt.length > 0)
-        .map(opt => opt.replace(/^[A-D]\)\s*/, ''));
+    if (!optionsMatch) {
+      console.error('No options found for MCQ/MSQ question');
+      throw new Error('No options found in response for multiple choice question');
+    }
+    const optionsText = optionsMatch[1].trim();
+    options = optionsText
+      .split('\n')
+      .map(opt => opt.trim())
+      .filter(opt => opt.length > 0)
+      .map(opt => opt.replace(/^[A-D]\)\s*/, ''));
+
+    if (options.length !== 4) {
+      console.error('Expected 4 options, got:', options.length);
+      throw new Error(`Expected 4 options but got ${options.length}`);
     }
   }
 
+  console.log('Successfully parsed question');
   return {
     question_statement,
     options,
@@ -294,13 +360,25 @@ function parseGeneratedQuestion(text: string, questionType: string): GeneratedQu
 }
 
 function parsePYQSolution(text: string, questionType: string): { answer: string; solution: string } {
+  console.log('Parsing PYQ solution:', text.substring(0, 200) + '...');
+
   const answerMatch = text.match(/ANSWER:\s*(.*?)(?=\n|SOLUTION:)/);
   const solutionMatch = text.match(/SOLUTION:\s*([\s\S]*?)$/);
 
-  return {
-    answer: answerMatch ? answerMatch[1].trim() : '',
-    solution: solutionMatch ? solutionMatch[1].trim() : ''
-  };
+  if (!answerMatch || !solutionMatch) {
+    console.error('Failed to parse PYQ solution. Text:', text);
+    throw new Error('Could not parse PYQ solution response');
+  }
+
+  const answer = answerMatch[1].trim();
+  const solution = solutionMatch[1].trim();
+
+  if (!answer || !solution) {
+    throw new Error('Answer or solution is empty');
+  }
+
+  console.log('Successfully parsed PYQ solution');
+  return { answer, solution };
 }
 
 async function verifyAnswer(question: GeneratedQuestion, context: QuestionContext): Promise<boolean> {

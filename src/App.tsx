@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
-import { Loader2, Save, CheckCircle2, Play, Pause, AlertCircle } from 'lucide-react';
+import { Loader2, Save, CheckCircle2, Play, Pause, AlertCircle, TestTube } from 'lucide-react';
 import { supabase } from './lib/supabase';
 import { generateQuestion, generatePYQSolution, GeneratedQuestion, QuestionContext } from './lib/gemini';
 import { calculateQuestionDistribution, TopicDistribution } from './lib/weightage';
+import { testAllApiKeys } from './lib/testApiKeys';
 
 interface QuestionWithMetadata extends GeneratedQuestion {
   topic_id: string;
@@ -53,6 +54,7 @@ function App() {
 
   const [newQuestionsCount, setNewQuestionsCount] = useState(0);
   const [pyqSolutionsCount, setPyqSolutionsCount] = useState(0);
+  const [testingApiKeys, setTestingApiKeys] = useState(false);
 
   const [autoProgress, setAutoProgress] = useState({
     currentSubjectIndex: 0,
@@ -547,6 +549,19 @@ function App() {
     };
   };
 
+  const handleTestApiKeys = async () => {
+    setTestingApiKeys(true);
+    setError('');
+    try {
+      await testAllApiKeys();
+      alert('API key testing complete. Check console for details.');
+    } catch (err: any) {
+      setError('API key testing failed: ' + err.message);
+    } finally {
+      setTestingApiKeys(false);
+    }
+  };
+
   console.log('Rendering App component...');
   console.log('Exams:', exams);
   console.log('Error:', error);
@@ -554,7 +569,26 @@ function App() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 p-6">
       <div className="max-w-7xl mx-auto">
-        <h1 className="text-4xl font-bold text-slate-800 mb-8">AI Question Generator</h1>
+        <div className="flex justify-between items-center mb-8">
+          <h1 className="text-4xl font-bold text-slate-800">AI Question Generator</h1>
+          <button
+            onClick={handleTestApiKeys}
+            disabled={testingApiKeys}
+            className="flex items-center gap-2 px-4 py-2 bg-slate-600 text-white rounded-lg font-medium hover:bg-slate-700 disabled:bg-slate-300"
+          >
+            {testingApiKeys ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Testing...
+              </>
+            ) : (
+              <>
+                <TestTube className="w-4 h-4" />
+                Test API Keys
+              </>
+            )}
+          </button>
+        </div>
         {!exams.length && !error && (
           <div className="bg-blue-50 border border-blue-200 text-blue-700 px-4 py-3 rounded-lg mb-6">
             Loading data from database...
