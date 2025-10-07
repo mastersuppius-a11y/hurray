@@ -1,15 +1,23 @@
 const GEMINI_API_KEYS = (import.meta.env.VITE_GEMINI_API_KEYS || '').split(',').filter(key => key.trim());
 
+console.log('Loaded Gemini API Keys:', GEMINI_API_KEYS.length);
+
 if (GEMINI_API_KEYS.length === 0) {
-  console.error('No Gemini API keys found!');
+  console.error('No Gemini API keys found in environment variables!');
+  throw new Error('No Gemini API keys configured. Please add VITE_GEMINI_API_KEYS to your .env file.');
 }
+
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent';
 
 let currentKeyIndex = 0;
+const keyUsageCount: number[] = new Array(GEMINI_API_KEYS.length).fill(0);
 
 function getNextApiKey(): string {
   const key = GEMINI_API_KEYS[currentKeyIndex];
+  const keyIndex = currentKeyIndex;
   currentKeyIndex = (currentKeyIndex + 1) % GEMINI_API_KEYS.length;
+  keyUsageCount[keyIndex]++;
+  console.log(`Using API Key ${keyIndex + 1}/${GEMINI_API_KEYS.length} (used ${keyUsageCount[keyIndex]} times)`);
   return key;
 }
 
@@ -29,11 +37,12 @@ export interface QuestionContext {
 }
 
 async function callGeminiAPI(prompt: string, retryCount = 0): Promise<string> {
-  if (retryCount >= GEMINI_API_KEYS.length) {
-    throw new Error('All API keys failed. Please check your Gemini API configuration.');
+  if (retryCount >= GEMINI_API_KEYS.length * 2) {
+    throw new Error('All API keys failed after multiple retries. Please check your Gemini API configuration and quota.');
   }
 
   const apiKey = getNextApiKey();
+  console.log(`Calling Gemini API (attempt ${retryCount + 1})...`);
 
   try {
     const response = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
@@ -58,14 +67,33 @@ async function callGeminiAPI(prompt: string, retryCount = 0): Promise<string> {
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(`API Key ${retryCount + 1} failed:`, errorText);
+      console.error(`API Key ${Math.floor(retryCount / 2) + 1} failed with status ${response.status}:`, errorText);
+
+      if (response.status === 429) {
+        console.log('Rate limit hit, waiting 2 seconds before retry...');
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+
       return callGeminiAPI(prompt, retryCount + 1);
     }
 
     const data = await response.json();
+
+    if (!data.candidates || !data.candidates[0] || !data.candidates[0].content || !data.candidates[0].content.parts || !data.candidates[0].content.parts[0]) {
+      console.error('Invalid API response structure:', JSON.stringify(data));
+      throw new Error('Invalid response from Gemini API');
+    }
+
+    console.log('✓ Successfully received response from Gemini API');
     return data.candidates[0].content.parts[0].text;
-  } catch (error) {
-    console.error(`API Key ${retryCount + 1} error:`, error);
+  } catch (error: any) {
+    console.error(`API Key ${Math.floor(retryCount / 2) + 1} error:`, error.message);
+
+    if (error.message.includes('Invalid response')) {
+      throw error;
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 1000));
     return callGeminiAPI(prompt, retryCount + 1);
   }
 }
@@ -77,17 +105,28 @@ export async function generateQuestion(
   alreadyGeneratedQuestions: string[],
   context: QuestionContext
 ): Promise<GeneratedQuestion> {
+  console.log(`Generating ${questionType} question for topic: ${context.topicName}`);
+
   const prompt = buildQuestionPrompt(questionType, existingQuestions, alreadyGeneratedQuestions, context);
-  const generatedText = await callGeminiAPI(prompt);
-  const question = parseGeneratedQuestion(generatedText, questionType);
 
-  const isValid = await verifyAnswer(question, context);
-  if (!isValid) {
-    console.log('Answer verification failed, regenerating...');
-    return generateQuestion(questionType, topicId, existingQuestions, alreadyGeneratedQuestions, context);
+  try {
+    const generatedText = await callGeminiAPI(prompt);
+    console.log('Parsing generated response...');
+    const question = parseGeneratedQuestion(generatedText, questionType);
+
+    console.log('Verifying answer...');
+    const isValid = await verifyAnswer(question, context);
+    if (!isValid) {
+      console.log('Answer verification failed, regenerating...');
+      return generateQuestion(questionType, topicId, existingQuestions, alreadyGeneratedQuestions, context);
+    }
+
+    console.log('✓ Question generated and verified successfully');
+    return question;
+  } catch (error: any) {
+    console.error('Failed to generate question:', error);
+    throw new Error(`Question generation failed: ${error.message}`);
   }
-
-  return question;
 }
 
 export async function generatePYQSolution(

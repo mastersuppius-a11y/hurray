@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Loader2, Save, CheckCircle2, Play, Pause, AlertCircle } from 'lucide-react';
 import { supabase } from './lib/supabase';
 import { generateQuestion, generatePYQSolution, GeneratedQuestion, QuestionContext } from './lib/gemini';
@@ -48,7 +48,7 @@ function App() {
   const [currentPreview, setCurrentPreview] = useState<number>(-1);
 
   const [isGenerating, setIsGenerating] = useState(false);
-  const [isPaused, setIsPaused] = useState(false);
+  const isPausedRef = useRef(false);
   const [error, setError] = useState('');
 
   const [newQuestionsCount, setNewQuestionsCount] = useState(0);
@@ -306,8 +306,17 @@ function App() {
       return;
     }
 
+    if (!selectedQuestionType) {
+      setError('Please select a question type for auto generation');
+      return;
+    }
+
+    console.log('Starting auto generation...');
+    console.log('Distribution:', distribution);
+    console.log('Question Type:', selectedQuestionType);
+
     setIsGenerating(true);
-    setIsPaused(false);
+    isPausedRef.current = false;
     setError('');
     setGeneratedQuestions([]);
     setNewQuestionsCount(0);
@@ -326,65 +335,81 @@ function App() {
   };
 
   const generateQuestionsAutomatically = async () => {
-    for (const topicDist of distribution) {
-      if (isPaused) break;
+    try {
+      for (const topicDist of distribution) {
+        if (isPausedRef.current) break;
 
-      const context = await getQuestionContextForTopic(topicDist.topicId);
-      if (!context) continue;
+        console.log(`Generating ${topicDist.questionsToGenerate} questions for topic: ${topicDist.topicName}`);
 
-      const { data: existingQuestions } = await supabase
-        .from('questions_topic_wise')
-        .select('question_statement')
-        .eq('topic_id', topicDist.topicId);
+        const context = await getQuestionContextForTopic(topicDist.topicId);
+        if (!context) {
+          console.error('Could not get context for topic:', topicDist.topicId);
+          setError(`Could not load context for topic: ${topicDist.topicName}`);
+          continue;
+        }
 
-      const existing = existingQuestions?.map(q => q.question_statement) || [];
+        const { data: existingQuestions } = await supabase
+          .from('questions_topic_wise')
+          .select('question_statement')
+          .eq('topic_id', topicDist.topicId);
 
-      for (let i = 0; i < topicDist.questionsToGenerate; i++) {
-        if (isPaused) break;
+        const existing = existingQuestions?.map(q => q.question_statement) || [];
 
-        try {
-          const { data: alreadyGenerated } = await supabase
-            .from('new_questions')
-            .select('question_statement')
-            .eq('topic_id', topicDist.topicId);
+        for (let i = 0; i < topicDist.questionsToGenerate; i++) {
+          if (isPausedRef.current) break;
 
-          const generated = alreadyGenerated?.map(q => q.question_statement) || [];
+          try {
+            const { data: alreadyGenerated } = await supabase
+              .from('new_questions')
+              .select('question_statement')
+              .eq('topic_id', topicDist.topicId);
 
-          const question = await generateQuestion(
-            selectedQuestionType || 'MCQ',
-            topicDist.topicId,
-            existing,
-            generated,
-            context
-          );
+            const generated = alreadyGenerated?.map(q => q.question_statement) || [];
 
-          const questionWithMetadata: QuestionWithMetadata = {
-            ...question,
-            topic_id: topicDist.topicId,
-            part_id: selectedPart || undefined,
-            slot_id: selectedSlot || undefined,
-            correct_marks: parseFloat(correctMarks),
-            incorrect_marks: parseFloat(incorrectMarks),
-            skipped_marks: parseFloat(skippedMarks),
-            time_minutes: parseFloat(timeMinutes)
-          };
+            console.log(`Generating question ${i + 1}/${topicDist.questionsToGenerate} for ${topicDist.topicName}`);
 
-          await saveQuestionToSupabase(questionWithMetadata);
+            const question = await generateQuestion(
+              selectedQuestionType || 'MCQ',
+              topicDist.topicId,
+              existing,
+              generated,
+              context
+            );
 
-          setGeneratedQuestions(prev => [...prev, questionWithMetadata]);
-          setNewQuestionsCount(prev => prev + 1);
-          setAutoProgress(prev => ({
-            ...prev,
-            questionsGenerated: prev.questionsGenerated + 1
-          }));
+            const questionWithMetadata: QuestionWithMetadata = {
+              ...question,
+              topic_id: topicDist.topicId,
+              part_id: selectedPart || undefined,
+              slot_id: selectedSlot || undefined,
+              correct_marks: parseFloat(correctMarks),
+              incorrect_marks: parseFloat(incorrectMarks),
+              skipped_marks: parseFloat(skippedMarks),
+              time_minutes: parseFloat(timeMinutes)
+            };
 
-        } catch (err: any) {
-          console.error('Error generating question:', err);
+            await saveQuestionToSupabase(questionWithMetadata);
+
+            setGeneratedQuestions(prev => [...prev, questionWithMetadata]);
+            setNewQuestionsCount(prev => prev + 1);
+            setAutoProgress(prev => ({
+              ...prev,
+              questionsGenerated: prev.questionsGenerated + 1
+            }));
+
+            console.log(`Successfully generated question ${i + 1}/${topicDist.questionsToGenerate}`);
+
+          } catch (err: any) {
+            console.error('Error generating question:', err);
+            setError(`Failed to generate question for ${topicDist.topicName}: ${err.message}`);
+          }
         }
       }
+    } catch (err: any) {
+      console.error('Auto generation error:', err);
+      setError(`Auto generation failed: ${err.message}`);
+    } finally {
+      setIsGenerating(false);
     }
-
-    setIsGenerating(false);
   };
 
   const handleGeneratePYQSolutions = async () => {
@@ -413,7 +438,7 @@ function App() {
       }
 
       for (const pyq of pyqs) {
-        if (isPaused) break;
+        if (isPausedRef.current) break;
 
         try {
           const context = await getQuestionContextForTopic(pyq.topic_id);
@@ -840,7 +865,7 @@ function App() {
                 </button>
                 {isGenerating && (
                   <button
-                    onClick={() => setIsPaused(true)}
+                    onClick={() => { isPausedRef.current = true; setIsGenerating(false); }}
                     className="px-6 bg-orange-600 text-white py-3 rounded-lg font-medium hover:bg-orange-700 flex items-center gap-2"
                   >
                     <Pause className="w-5 h-5" />
